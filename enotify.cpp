@@ -43,7 +43,7 @@ struct eventID {
   eventID next() const { eventID e; e.id = id + 1; return e; }
 
   char* json_serialize(char* buf) const {
-    int s = sprintf(buf, "\"%llu\"", id);
+    int s = sprintf(buf, "\"%lu\"", id);
     return buf + s;
   }
 
@@ -64,7 +64,7 @@ struct eventID {
 
 struct versionID : public eventID {
   char* json_serialize(char* buf) const {
-    int s = sprintf(buf, "%llu", id);
+    int s = sprintf(buf, "%lu", id);
     return buf + s;
   }
 
@@ -224,7 +224,7 @@ public:
     send_ptr = 0;
     state = STATE_SEND_RESPONSE;
     buffer[buffer_used] = '\0';
-    DEBUG_PRINTF("sending response, length %zu: \"%s\"\n", buffer_used, buffer);
+    DEBUG_PRINTF("sending response, length %lu: \"%s\"\n", buffer_used, buffer);
   }
 
   void send_response(const char* content_type, const char* response, size_t response_length, bool allow_cache) {
@@ -246,7 +246,6 @@ public:
     size_t header_len = sprintf(buffer,
       "HTTP/%s 200 OK\r\n"
       "%s"
-      "X-Served-By: enotify\r\n"
       "Content-Type: %s\r\n"
       "Connection: %s\r\n"
       "Content-Length: %zu\r\n"
@@ -410,12 +409,12 @@ public:
           events_copy.swap(events);
           DEBUG_PRINTF("read subscribe request. events are:\n");
           for (std::map<eventID, versionID>::iterator it = events_copy.begin(); it != events_copy.end(); ++it) {
-            DEBUG_PRINTF("%llu -> %llu\n", it->first.id, it->second.id);
+            DEBUG_PRINTF("%lu -> %lu\n", it->first.id, it->second.id);
             std::map<eventID, eventmap_value_t>::iterator evit = eventmap.find(it->first);
             if ((evit != eventmap.end()) && (!(evit->second.version == it->second))) {
               awakeWithID(it->first, evit->second.version, false);
               immediate_awake = true;
-              DEBUG_PRINTF("immediate awake for event %llu new version %llu\n", it->first.id, evit->second.version.id);
+              DEBUG_PRINTF("immediate awake for event %lu new version %lu\n", it->first.id, evit->second.version.id);
             } else {
               if (evit == eventmap.end()) {
                 evit = eventmap.insert(std::make_pair(it->first, eventmap_value_t(it->second))).first;
@@ -572,7 +571,7 @@ protected:
 };
 
 void update_event(const eventID& e, versionID& v) {
-  DEBUG_PRINTF("update_event eid=%llu version=%llu\n", e.id, v.id);
+  DEBUG_PRINTF("update_event eid=%lu version=%lu\n", e.id, v.id);
   eventmap_value_t& ev = eventmap[e];
   /*
   if (v.empty()) { // empty/0 just increments the version
@@ -585,7 +584,7 @@ void update_event(const eventID& e, versionID& v) {
   }*/
   if (ev.version == v) return; // do not wake subscribers if the data doesn't actually change.
   ev.version = v;
-  DEBUG_PRINTF("update_event waking %zu subscribers\n", ev.subscribers.size());
+  DEBUG_PRINTF("update_event waking %lu subscribers\n", ev.subscribers.size());
   for (std::set<ClientFD*>::iterator it = ev.subscribers.begin(); it != ev.subscribers.end(); ++it) {
     (*it)->awakeWithID(e, v);
   }
