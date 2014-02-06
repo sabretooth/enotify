@@ -20,8 +20,8 @@
 #include <list>
 #include <string>
 
-#define DEBUG_PRINTF printf
-//#define DEBUG_PRINTF(x, ...)
+//#define DEBUG_PRINTF printf
+#define DEBUG_PRINTF(x, ...)
 
 #define DEFAULT_TIMEOUT 55 // seconds
 
