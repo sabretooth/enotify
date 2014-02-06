@@ -262,31 +262,18 @@ public:
     size_t response_used = 0;
     char* response = (char*)malloc(response_max);
 
-    size_t jsonp_second_part_offset = std::string::npos;
-
-    if (jsonp.empty()) {
-      strcpy(response, RESPONSE_PRELUDE);
-      response_used = strlen(RESPONSE_PRELUDE);
-    } else {
-      jsonp_second_part_offset = jsonp.find("%1%");
-      if (jsonp_second_part_offset == std::string::npos) {
-        strcpy(response, jsonp.c_str());
-        response_used = jsonp.size();
-      } else {
-        memcpy(response, jsonp.c_str(), jsonp_second_part_offset);
-        response_used = jsonp_second_part_offset;
-        jsonp_second_part_offset += 3; // skip over %1%
-      }
-    }
     bool first = true;
+    strcpy(response, RESPONSE_PRELUDE);
+    response_used = strlen(RESPONSE_PRELUDE);
     response[response_used++] = '{';
     for (std::map<eventID, versionID>::const_iterator it = events.begin(); it != events.end(); ++it) {
       size_t space_needed = it->first.json_serialize_space_needed() + it->second.json_serialize_space_needed() + 4;
-      if (response_used + space_needed >= response_max) {
+      char* p = response + response_used;
+      if ((p + space_needed)  >= (response + response_used)) {
         response_max += std::max<size_t>(1024, space_needed);
         response = (char*)realloc(response, response_max);
+        p = response + response_used;
       }
-      char* p = response + response_used;
       if (!first) *p++ = ',';
       first = false;
       p = it->first.json_serialize(p);
@@ -295,19 +282,6 @@ public:
       response_used = p - response;
     }
     response[response_used++] = '}';
-
-    if (jsonp_second_part_offset != std::string::npos) {
-      size_t second_part_size = jsonp.size() - jsonp_second_part_offset;
-
-      if (response_used + second_part_size >= response_max) {
-        response_max += std::max<size_t>(1024, second_part_size);
-        response = (char*)realloc(response, response_max);
-      }
-      
-      memcpy(response + response_used, jsonp.c_str() + jsonp_second_part_offset, second_part_size);
-      response_used += second_part_size;
-    }
-
     send_response("text/javascript", response, response_used, false);
 
     free(response);
@@ -321,19 +295,12 @@ public:
 
     if (buffer_used < 32) return REQUEST_INCOMPLETE;
     buffer[buffer_used] = '\0'; // ensure it's null terminated at least
-
-    if (! strstr(buffer, "\r\n\r\n")) {
-      DEBUG_PRINTF("Didn't find terminating \\r\\n\\r\\n, request incomplete?\n");
-      return REQUEST_INCOMPLETE;
-    }
-
-    DEBUG_PRINTF("parsing request, length %zu: \"%s\"\n", buffer_used, buffer);
+    DEBUG_PRINTF("parsing request, length %lu: \"%s\"\n", buffer_used, buffer);
     // the saddest thing: c++ as a string mangling engine
     if (!strstr(buffer, "HTTP/1.1")) http_onepointone = false;
     should_close_after_send = !http_onepointone;
 
-    if ((memcmp(buffer, "GET", 3) == 0) &&
-        (memcmp(buffer, "GET /subscribe?", 14) != 0))  {
+    if (memcmp(buffer, "GET", 3) == 0) {
       // GET request: static resource.
       strtok(buffer, " ");
       char* static_uri = strtok(NULL, " ?\r\n");
@@ -343,108 +310,63 @@ public:
       return REQUEST_HANDLED;
     }
 
-    bool doing_post_request = (memcmp(buffer, "POST ", 5) == 0);
-
-    if (! doing_post_request) {
-
-      char* p = strstr(buffer, "/subscribe?");
-      if (! p) {
-        throw std::runtime_error("Unable to parse request: couldn't find GET vars.");
-      }
-      while (*p != '?') ++p; ++p; // skip to after the '?', the GET vars
-
-      while (*p) {
-        if (*p == 'j') {
-          while (*p && *p != '=') ++p; ++p;
-          char* jsonp_start = p;
-          while (*p && *p != '&' && *p != ' ') ++p;
-          jsonp.clear();
-          jsonp.reserve(p - jsonp_start);
-          for (; jsonp_start != p; ++jsonp_start) {
-            if (*jsonp_start == '%') {
-              jsonp_start++;
-              char c[4];
-              c[0] = *(jsonp_start++);
-              c[1] = *(jsonp_start);
-              c[2] = '\0';
-              jsonp.push_back(strtol(c, NULL, 16));
-            } else jsonp.push_back(*jsonp_start);
-          }
-
-          DEBUG_PRINTF("jsonp = \"%s\"\n", jsonp.c_str());
-        } else if (*p == '&' || isspace(*p)) {
-          ++p;
-          continue;
-        } else {
-          eventID e;
-          versionID v;
-          p = e.json_deserialize(p);
-          while (*p && *p != '=') ++p;
-          if (!*p) break;
-          ++p;
-          p = v.json_deserialize(p);
-          events.insert(std::make_pair(e, v));
-        }
-      }
+    if (memcmp(buffer, "POST", 4) != 0) {
+      throw FmtException("Invalid request type \"%s\" -- expected \"POST\"", strtok(buffer, " "));
     }
-
     // Check for "Connection: close" or something similar
     char* connection_header = strstr(buffer, "Connection:");
     if (connection_header) {
       char* p = connection_header + 11; // "Connection: "
-      char buf[256]; char* bufptr = buf;
-      while (*p != '\n' && *p != '\r' && *p) *bufptr++ = *p++;
+      char buf[256]; char* bufptr = buf; char* bufend = buf + 255;
+      while (*p != '\n' && *p != '\r' && *p && bufptr < bufend) *bufptr++ = *p++;
       *bufptr = '\0';
       if (strstr(buf, "close")) should_close_after_send = true;
       DEBUG_PRINTF("found connection header \"%s\", close=%d\n", buf, should_close_after_send);
     }
+    char* content_length_start = strstr(buffer, "Content-Length");
+    if (content_length_start) {
+      char* p = content_length_start;
+      while (*p && *p != ' ') ++p;
+      if (*p != '\0') {
+        request_content_length = strtol(p, &p, 10);
+      }
+    }
+    char* content_start = strstr(buffer, "\r\n\r\n");
+    if (! content_start) content_start = strstr(buffer, "\n\n");
+    if (! content_start) {
+      DEBUG_PRINTF("unable to find content_start\n");
+      return REQUEST_INCOMPLETE;
+    }
+    if (request_content_length >= 0) {
+      DEBUG_PRINTF("found content length = %lu\n", request_content_length);
+      size_t content_start_offset = content_start - buffer;
+      size_t current_content_length = buffer_used - content_start_offset;
+      if (current_content_length < (size_t)request_content_length) return REQUEST_INCOMPLETE;
+    } else {
+      DEBUG_PRINTF("no content length found in header\n");
+    }
 
-    if (doing_post_request) {
-      char* content_length_start = strstr(buffer, "Content-Length");
-      if (content_length_start) {
-        char* p = content_length_start;
-        while (*p && *p != ' ') ++p;
-        if (*p != '\0') {
-          request_content_length = strtol(p, &p, 10);
-        }
-      }
-      char* content_start = strstr(buffer, "\r\n\r\n");
-      if (! content_start) content_start = strstr(buffer, "\n\n");
-      if (! content_start) {
-        DEBUG_PRINTF("unable to find content_start\n");
-        return REQUEST_INCOMPLETE;
-      }
-      if (request_content_length >= 0) {
-        DEBUG_PRINTF("found content length = %zu\n", request_content_length);
-        size_t content_start_offset = content_start - buffer;
-        size_t current_content_length = buffer_used - content_start_offset;
-        if (current_content_length < (size_t)request_content_length) return REQUEST_INCOMPLETE;
-      } else {
-        DEBUG_PRINTF("no content length found in header\n");
-      }
-      
-      // we have content, deserialize it into the events map
-      char* p = content_start;
-      while (*p && *p != '{') ++p;
-      if (!*p) throw std::runtime_error("Malformed content: cannot find opening '{' for json object");
-      while (*p && *p != '}') {
-        ++p; // skip the preceding '{' or ','
-        eventID e;
-        versionID v;
-        p = e.json_deserialize(p);
-        while (*p && *p != ':') ++p;
-        if (!*p) break;
-        ++p; // skip :
-        p = v.json_deserialize(p);
-        events.insert(std::make_pair(e, v));
-        while (*p && *p != ',' && *p != '}') ++p;
-      }
-      strtok(buffer, " ");
-      char* uri = strtok(NULL, " \r\n");
-      if (strstr(uri, "subscribe")) return REQUEST_SUBSCRIBE;
-      else if (strstr(uri, "notify")) return REQUEST_NOTIFY;
-      else throw FmtException("Unknown request URI \"%s\", not subscribe or notify", uri);
-    } else return REQUEST_SUBSCRIBE;
+    // we have content, deserialize it into the events map
+    char* p = content_start;
+    while (*p && *p != '{') ++p;
+    if (!*p) throw std::runtime_error("Malformed content: cannot find opening '{' for json object");
+    while (*p && *p != '}') {
+      ++p; // skip the preceding '{' or ','
+      eventID e;
+      versionID v;
+      p = e.json_deserialize(p);
+      while (*p && *p != ':') ++p;
+      if (!*p) break;
+      ++p; // skip :
+      p = v.json_deserialize(p);
+      events.insert(std::make_pair(e, v));
+      while (*p && *p != ',' && *p != '}') ++p;
+    }
+    strtok(buffer, " ");
+    char* uri = strtok(NULL, " \r\n");
+    if (strstr(uri, "subscribe")) return REQUEST_SUBSCRIBE;
+    else if (strstr(uri, "notify")) return REQUEST_NOTIFY;
+    else throw FmtException("Unknown request URI \"%s\", not subscribe or notify", uri);
   }
 
   virtual int process_events(short revents) {
@@ -602,7 +524,6 @@ protected:
 
   std::map<eventID, versionID> events;
   std::set<eventID> subscribed_events;
-  std::string jsonp;
   timeout_queue_entry* tqe;
 };
 
