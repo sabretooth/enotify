@@ -39,6 +39,7 @@ struct eventID {
   eventID& operator=(const eventID& right) { id = right.id; return *this; }
   bool operator<(const eventID& right) const { return id < right.id; }
   bool operator==(const eventID& right) const { return id == right.id; }
+  bool operator!=(const eventID& right) const { return id != right.id; }
   bool empty() const { return (id == 0); }
   eventID next() const { eventID e; e.id = id + 1; return e; }
 
@@ -76,11 +77,13 @@ struct versionID : public eventID {
 };
 
 struct eventmap_value_t {
-  eventmap_value_t() {}
-  eventmap_value_t(const versionID& _v) : version(_v) {}
+  eventmap_value_t() : hasInitialValue(false) {}
+  eventmap_value_t(const versionID& _v) : version(_v), hasInitialValue(true) {}
 
   versionID version;
   std::set<ClientFD*> subscribers;
+  bool hasInitialValue : 1;
+
   void subscribe(ClientFD* cfd) {
     subscribers.insert(cfd);
   }
@@ -410,15 +413,18 @@ public:
           DEBUG_PRINTF("read subscribe request. events are:\n");
           for (std::map<eventID, versionID>::iterator it = events_copy.begin(); it != events_copy.end(); ++it) {
             DEBUG_PRINTF("%lu -> %lu\n", it->first.id, it->second.id);
+
             std::map<eventID, eventmap_value_t>::iterator evit = eventmap.find(it->first);
-            if ((evit != eventmap.end()) && (!(evit->second.version == it->second))) {
+            if (evit == eventmap.end()) {
+              // channel does not exist yet, create it in the uninitialized state
+              evit = eventmap.insert(std::make_pair(it->first, eventmap_value_t())).first;
+            }
+
+            if (evit->second.hasInitialValue && evit->second.version != it->second) {
               awakeWithID(it->first, evit->second.version, false);
               immediate_awake = true;
               DEBUG_PRINTF("immediate awake for event %lu new version %lu\n", it->first.id, evit->second.version.id);
             } else {
-              if (evit == eventmap.end()) {
-                evit = eventmap.insert(std::make_pair(it->first, eventmap_value_t(it->second))).first;
-              }
               evit->second.subscribe(this);
               subscribed_events.insert(it->first);
             }
@@ -582,7 +588,14 @@ void update_event(const eventID& e, versionID& v) {
     v = ev.version;
     return;
   }*/
-  if (ev.version == v) return; // do not wake subscribers if the data doesn't actually change.
+
+  if (!ev.hasInitialValue) {
+    // consider the event initialized now. this will wake all subscribers, since they could've
+    // subscribed with any arbitrary data.
+    ev.hasInitialValue = true;
+  } else {
+    if (ev.version == v) return; // do not wake subscribers if the data doesn't actually change.
+  }
   ev.version = v;
   DEBUG_PRINTF("update_event waking %lu subscribers\n", ev.subscribers.size());
   for (std::set<ClientFD*>::iterator it = ev.subscribers.begin(); it != ev.subscribers.end(); ++it) {
